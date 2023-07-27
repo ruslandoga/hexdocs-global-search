@@ -1,21 +1,18 @@
-# Doku
+Start typesense
 
-**TODO: Add description**
-
-## Installation
-
-If [available in Hex](https://hex.pm/docs/publish), the package can be installed
-by adding `doku` to your list of dependencies in `mix.exs`:
-
-```elixir
-def deps do
-  [
-    {:doku, "~> 0.1.0"}
-  ]
-end
+```console
+$ docker run -p 8108:8108 -v kex_typesense_data:/data typesense/typesense:0.24.1 --data-dir /data --api-key=kex
 ```
 
-Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_doc)
-and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
-be found at <https://hexdocs.pm/doku>.
+Build the index
 
+```elixir
+Doku.scrape()
+Doku.import_collection()
+```
+
+Try
+
+```elixir
+Doku.search(%{"query_by" => "title", "q" => "assert"})
+```

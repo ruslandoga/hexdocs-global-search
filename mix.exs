@@ -14,7 +14,7 @@ defmodule Doku.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger],
+      extra_applications: [:logger, :inets, :ssl],
       mod: {Doku.Application, []}
     ]
   end
@@ -24,7 +24,8 @@ defmodule Doku.MixProject do
     [
       {:finch, "~> 0.16.0"},
       {:floki, "~> 0.34.3"},
-      {:jason, "~> 1.4"}
+      {:jason, "~> 1.4"},
+      {:hex_core, "~> 0.10.0"}
     ]
   end
 end
