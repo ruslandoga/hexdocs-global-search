@@ -74,6 +74,20 @@ defmodule Doku do
 
   @headers [{"x-typesense-api-key", "kex"}]
 
+  def remove_collection do
+    Finch.request!(
+      Finch.build(:delete, "http://localhost:8108/collections/docs", @headers),
+      Doku.Finch
+    )
+  end
+
+  def collection_info do
+    Finch.request!(
+      Finch.build(:get, "http://localhost:8108/collections/docs", @headers),
+      Doku.Finch
+    )
+  end
+
   def import_collection do
     body =
       Jason.encode_to_iodata!(%{
@@ -96,19 +110,34 @@ defmodule Doku do
 
     File.ls!("index")
     |> Enum.map(fn name -> "index/#{name}" end)
-    |> async_stream(&__MODULE__.import_doc/1, ordered: false, max_concurrency: 1)
+    |> async_stream(&__MODULE__.import_doc/1, ordered: false, max_concurrency: 100)
     |> Stream.run()
   end
 
   def import_doc(file) do
     Logger.debug("importing #{file}")
-    json = file |> File.read!() |> String.replace(["\\\\#", "\\\#"], "#")
+    json = ensure_json(File.read!(file), "")
 
-    case Jason.decode!(json) do
-      items when is_list(items) -> import_items(items)
-      %{"items" => items} -> import_items(items)
+    try do
+      case Jason.decode!(json) do
+        items when is_list(items) -> import_items(items)
+        %{"items" => items} -> import_items(items)
+      end
+    rescue
+      e ->
+        Logger.error("failed to import #{file}: " <> Exception.message(e))
     end
   end
+
+  defp ensure_json(<<"\\#", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "#">>)
+
+  defp ensure_json(<<"\\a", rest::binary>>, acc),
+    do: ensure_json(rest, <<acc::binary, "\\u0007">>)
+
+  defp ensure_json(<<"\\\\d", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\d">>)
+  # defp ensure_json(<<"\\s", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, " ">>)
+  defp ensure_json(<<x, rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, x>>)
+  defp ensure_json(<<>>, acc), do: acc
 
   defp import_items([]), do: :ok
 
