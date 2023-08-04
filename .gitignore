@@ -25,3 +25,6 @@ doku-*.tar
 # Temporary files, for example, from tests.
 /tmp/
 /index/
+/stats/
+/tarballs/
+/releases/

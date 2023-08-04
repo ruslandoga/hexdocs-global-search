@@ -10,6 +10,7 @@ defmodule Doku.Application do
     children = [
       {Finch, name: Doku.Finch},
       {Task.Supervisor, name: Doku.TaskSupervisor}
+      # Doku.Repo
     ]
 
     # See https://hexdocs.pm/elixir/Supervisor.html

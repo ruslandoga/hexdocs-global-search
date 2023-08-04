@@ -25,7 +25,8 @@ defmodule Doku.MixProject do
       {:finch, "~> 0.16.0"},
       {:floki, "~> 0.34.3"},
       {:jason, "~> 1.4"},
-      {:hex_core, "~> 0.10.0"}
+      {:hex_core, "~> 0.10.0"},
+      {:ecto_sqlite3, "~> 0.10.3"}
     ]
   end
 end
