@@ -1,6 +1,6 @@
-### index all functions ranked by package popularity
+- index all functions ranked by package popularity
 
-This would make UI similar to devdocs possible.
+For UI similar to devdocs
 
 ```elixir
 Doku.post("collections", %{
@@ -16,7 +16,7 @@ Doku.post("collections", %{
 })
 ```
 
-Example search that filters functions in related packages only:
+Example search that filters functions in related packages only
 
 ```elixir
 collection = "functions"
@@ -33,20 +33,13 @@ result == [
 ]
 ```
 
-This can also be achieved automatically by using geosearch with coordinates representing package position in 2d map of hex.pm.
-
-```elixir
-
-```
-
-Typesense instance with these docs deployed on digitalocean:
-
-Integrating into ex_doc:
-
-Example package using this ex_doc version:
-
-### index both functions and guides headers
-
-### index everything (functions, docs, guides)
-
-### semantic search
+- [ ] search headers (autocomplete)
+- [ ] reproduce ex_doc behaviour as much as i can
+- [ ] search docs (full search)
+- [ ] related packages 2d
+- [ ] related packages v0.25-rc as node2vec
+- [ ] join on packages v0.26-rc
+- [ ] deploy on digitalocean
+- [ ] integrate into ex_doc
+- [ ] use in before_ch, mua, bamboo_mua, swoosh_mua
+- [ ] semantic search
