@@ -217,106 +217,272 @@ defmodule Doku do
   @headers [{"x-typesense-api-key", "kex"}]
 
   def remove_collection do
-    Finch.request!(
-      Finch.build(:delete, "http://localhost:8108/collections/docs", @headers),
-      Doku.Finch
-    )
+    delete("collections/docs")
   end
 
   def collection_info do
-    Finch.request!(
-      Finch.build(:get, "http://localhost:8108/collections/docs", @headers),
-      Doku.Finch
-    )
+    get("collections/docs")
   end
 
-  def import_collection do
-    body =
-      Jason.encode_to_iodata!(%{
-        "name" => "docs",
-        "default_sorting_field" => "recent_downloads",
-        "fields" => [
-          %{"name" => "doc", "type" => "string"},
-          %{"name" => "ref", "type" => "string", "index" => false},
-          %{"name" => "title", "type" => "string"},
-          %{"name" => "module", "type" => "string", "optional" => true},
-          %{"name" => "function", "type" => "string", "optional" => true},
-          %{"name" => "package", "type" => "string"},
-          %{"name" => "type", "type" => "string", "facet" => true},
-          %{"name" => "recent_downloads", "type" => "int32"}
-        ]
-      })
-
-    req = Finch.build(:post, "http://localhost:8108/collections", @headers, body)
-
-    case Finch.request!(req, Doku.Finch) do
-      %Finch.Response{status: status} when status in [201, 409] -> :ok
-      resp -> raise "failed to create `docs` collection: " <> inspect(resp)
+  def create_collection(schema \\ just_functions_schema()) do
+    case post("collections", schema) do
+      %Finch.Response{status: 201} -> :ok
+      resp -> raise "failed to create collection: " <> inspect(resp)
     end
+  end
 
+  def just_functions_schema do
+    %{
+      "name" => "functions",
+      "default_sorting_field" => "recent_downloads",
+      "token_separators" => ["."],
+      "fields" => [
+        %{"name" => "package", "type" => "string", "facet" => true},
+        %{"name" => "ref", "type" => "string", "index" => false, "optional" => true},
+        %{"name" => "title", "type" => "string"},
+        %{"name" => "recent_downloads", "type" => "int32"}
+      ]
+    }
+  end
+
+  def import_just_functions_collection do
     File.ls!("index")
-    |> Enum.map(fn name -> "index/#{name}" end)
-    |> async_stream(&__MODULE__.import_doc/1, ordered: false, max_concurrency: 100)
+    |> async_stream(
+      fn file ->
+        package = String.trim_trailing(file, ".json")
+        Logger.debug("importing #{package}")
+        items = read_docs_items(file)
+        stats = Jason.decode!(File.read!("stats/" <> file))
+        recent_downloads = get_in(stats, ["downloads", "recent"]) || 0
+
+        items =
+          items
+          |> Enum.filter(fn %{"type" => type, "ref" => ref, "title" => title} ->
+            if type == "function" do
+              segments = String.split(title, ".")
+              {function, module} = List.pop_at(segments, -1)
+              ref == Enum.join(module, ".") <> ".html#" <> function
+            end
+          end)
+          |> Enum.map(fn item ->
+            item |> Map.put("package", package) |> Map.put("recent_downloads", recent_downloads)
+          end)
+
+        import_items(_collection = "functions", items)
+      end,
+      ordered: false,
+      mac_concurrency: 1
+    )
     |> Stream.run()
   end
 
-  def import_doc(file) do
-    Logger.debug("importing #{file}")
-    ["index", package] = String.split(file, "/")
-    package = String.trim_trailing(package, ".json")
-    json = ensure_json(File.read!(file), "")
+  def everything_schema do
+    %{
+      "name" => "docs",
+      "default_sorting_field" => "recent_downloads",
+      "fields" => [
+        %{"name" => "doc", "type" => "string"},
+        %{"name" => "ref", "type" => "string", "index" => false},
+        %{"name" => "title", "type" => "string"},
+        %{"name" => "module", "type" => "string", "optional" => true},
+        %{"name" => "function", "type" => "string", "optional" => true},
+        %{"name" => "package", "type" => "string"},
+        %{"name" => "type", "type" => "string", "facet" => true},
+        %{"name" => "recent_downloads", "type" => "int32"}
+      ]
+    }
+  end
 
-    try do
-      case Jason.decode!(json) do
-        items when is_list(items) -> import_items(package, items)
-        %{"items" => items} -> import_items(package, items)
+  # def import_collection(name) do
+  #   File.ls!("index")
+  #   |> Enum.map(fn name -> "index/#{name}" end)
+  #   |> async_stream(&__MODULE__.import_doc/1, ordered: false, max_concurrency: 100)
+  #   |> Stream.run()
+  # end
+
+  # def import_doc(file) do
+  #   Logger.debug("importing #{file}")
+  #   ["index", package] = String.split(file, "/")
+  #   package = String.trim_trailing(package, ".json")
+  #   import_items(package, read_docs_items(file))
+  # end
+
+  def read_docs_items("index/" <> _ = file) do
+    json = File.read!(file)
+
+    docs =
+      case Jason.decode(json) do
+        {:ok, docs} ->
+          docs
+
+        {:error, %Jason.DecodeError{}} ->
+          fixed_json = fix_json(json)
+
+          case Jason.decode(fixed_json) do
+            {:ok, docs} ->
+              docs
+
+            {:error, %Jason.DecodeError{position: position} = error} ->
+              Logger.error(file: file, section: binary_slice(fixed_json, position - 10, 20))
+              raise error
+          end
       end
-    rescue
-      e ->
-        Logger.error("failed to import #{file}: " <> Exception.message(e))
+
+    case docs do
+      %{"items" => items} -> items
+      items when is_list(items) -> items
     end
   end
 
-  defp ensure_json(<<"\\#", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "#">>)
-  defp ensure_json(<<"\\\\#", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "#">>)
+  def read_docs_items(file), do: read_docs_items("index/" <> file)
 
-  defp ensure_json(<<"\\a", rest::binary>>, acc),
-    do: ensure_json(rest, <<acc::binary, "\\u0007">>)
+  def ensure_all_json do
+    File.ls!("index")
+    |> Enum.each(fn name ->
+      json = File.read!("index/#{name}")
 
-  # defp ensure_json(<<"\\\\d", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\d">>)
-  defp ensure_json(<<"\\\\d", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\d">>)
-  # defp ensure_json(<<"\\s", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\s">>)
-  # defp ensure_json(<<"\\\\", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\\">>)
-  defp ensure_json(<<x, rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, x>>)
-  defp ensure_json(<<>>, acc), do: acc
+      case Jason.decode(json) do
+        {:ok, _} ->
+          :ok
 
-  defp import_items(_package, []), do: :ok
+        {:error, %Jason.DecodeError{}} ->
+          fixed_json = fix_json(json)
 
-  defp import_items(package, items) do
+          case Jason.decode(fixed_json) do
+            {:ok, _} ->
+              :ok
+
+            {:error, %Jason.DecodeError{position: position} = error} ->
+              Logger.error(file: name, section: binary_slice(fixed_json, position - 10, 20))
+              raise error
+          end
+      end
+    end)
+  end
+
+  # https://github.com/elixir-lang/ex_doc/commit/60dfb4537549e551750bc9cd84610fb475f66acd
+  defp fix_json(json) do
+    json
+    # |> String.replace("\\#\{", "\#{")
+    |> to_json_string(<<>>)
+  end
+
+  # [file: "monad_cps.json", section: "gt;&gt;= \\a -&gt; Mo"]
+  defp to_json_string(<<" \\a", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "a">>)
+
+  # [file: "figlet.json", section: "en: flf2a\\d 4 3 8 15"]
+  defp to_json_string(<<"\\d", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "d">>)
+
+  # [file: "phoenix.json", section: "lo_dev=# \\d List of "]
+  defp to_json_string(<<"\\\\d", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "d">>)
+
+  # [file: "puid.json", section: "VWXYZ[]^_\\abcdefghij"]
+  defp to_json_string(<<"_\\a", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "_a">>)
+
+  # [file: "fluminus.json", section: "of nusstu\\e0123456)."]
+
+  defp to_json_string(<<"u\\e", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "ue">>)
+
+  # [file: "boxen.json", section: "t; &quot;\\e[31m&quot"]
+  defp to_json_string(<<";\\e", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, ";e">>)
+
+  # [file: "boxen.json", section: "4mhello, \\e[36melixi"]
+  defp to_json_string(<<", \\e", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, ", e">>)
+
+  # [file: "boxen.json", section: "36melixir\\e[0m&quot;"]
+  defp to_json_string(<<"r\\e", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "re">>)
+
+  # [file: "chi2fit.json", section: "2fit.Fit \\e [ 0 m \\e"]
+  defp to_json_string(<<" \\e", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, " e">>)
+
+  # [file: "chi2fit.json", section: "ic Errors\\e[0m e [ 0"]
+  defp to_json_string(<<"s\\e", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "se">>)
+
+  #  [file: "chi2fit.json", section: "formation\\e[0m e [ 0"]
+  defp to_json_string(<<"n\\e", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "ne">>)
+
+  # [file: "owl.json", section: "36m┌─\\e[31mRed!\\"]
+  defp to_json_string(<<"┌─\\e", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "┌─e">>)
+
+  # [file: "ex_unit_release.json", section: "ot;e[32m.\\e[0m Finis"]
+  defp to_json_string(<<".\\e", rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, ".e">>)
+
+  # [file: "cassandrax.json", section: "\"},{\"doc\":<<65, 32, "]
+  defp to_json_string(<<"\"doc\":<<", rest::bytes>>, acc),
+    do: to_json_string(rest, <<acc::bytes, "\"doc\":\"<<">>)
+
+  # [file: "cassandrax.json", section: "2, ...>>,\"ref\":\"Cass"]
+  defp to_json_string(<<">>,\"", rest::bytes>>, acc),
+    do: to_json_string(rest, <<acc::bytes, ">>\",\"">>)
+
+  # [file: "ecto.json", section: "ength, \\\"\\\#{Keyword."]
+  defp to_json_string(<<"\\\#{", rest::bytes>>, acc),
+    do: to_json_string(rest, <<acc::bytes, "\#{">>)
+
+  defp to_json_string(<<?\b, rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "\\b">>)
+
+  defp to_json_string(<<?\t, rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "\\t">>)
+
+  defp to_json_string(<<?\n, rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "\\n">>)
+
+  defp to_json_string(<<?\f, rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "\\f">>)
+
+  defp to_json_string(<<?\r, rest::binary>>, acc),
+    do: to_json_string(rest, <<acc::binary, "\\r">>)
+
+  # defp to_json_string(<<?\\, rest::binary>>, acc),
+  #   do: to_json_string(rest, <<acc::binary, "\\\\">>)
+
+  # defp to_json_string(<<?", rest::binary>>, acc),
+  #   do: to_json_string(rest, <<acc::binary, "\\\"">>)
+
+  defp to_json_string(<<x, rest::binary>>, acc) when x <= 0x000F,
+    do: to_json_string(rest, <<acc::binary, "\\u000#{Integer.to_string(x, 16)}">>)
+
+  defp to_json_string(<<x, rest::binary>>, acc) when x <= 0x001F,
+    do: to_json_string(rest, <<acc::binary, "\\u00#{Integer.to_string(x, 16)}">>)
+
+  defp to_json_string(<<x, rest::binary>>, acc), do: to_json_string(rest, <<acc::binary, x>>)
+  # defp to_json_string(<<>>, acc), do: <<acc::binary, "\"">>
+  defp to_json_string(<<>>, acc), do: acc
+
+  # defp ensure_json(<<"\\\#{", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\#{">>)
+
+  # # defp ensure_json(<<"\\\\d", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\d">>)
+  # # defp ensure_json(<<"\\s", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\s">>)
+  # # defp ensure_json(<<"\\\\", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\\">>)
+  # defp ensure_json(<<x, rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, x>>)
+  # defp ensure_json(<<>>, acc), do: acc
+
+  defp import_items(_collection, []), do: :ok
+
+  defp import_items(collection, items) do
     payload =
       items
-      |> Enum.map(fn item ->
-        item = Map.put(item, "package", package)
-
-        item =
-          case item do
-            %{"type" => "function", "title" => title} ->
-              segments = String.split(title, ".")
-              function = List.last(segments)
-              Map.put(item, "function", function)
-
-            _ ->
-              item
-          end
-
-        Jason.encode_to_iodata!(item)
-      end)
+      |> Enum.map(&Jason.encode_to_iodata!/1)
       |> Enum.intersperse("\n")
 
     req =
       Finch.build(
         :post,
-        "http://localhost:8108/collections/docs/documents/import",
+        "http://localhost:8108/collections/#{collection}/documents/import",
         @headers,
         payload
       )
@@ -330,15 +496,41 @@ defmodule Doku do
     |> Enum.reject(fn {%{"success" => success}, _item} -> success end)
     |> case do
       [] -> :ok
-      failed -> {:error, failed}
+      failed -> raise "failed to import docs: #{inspect(failed)}"
     end
   end
 
-  def search(query) do
-    url = "http://localhost:8108/collections/docs/documents/search?" <> URI.encode_query(query)
+  def search(collection, query, fields \\ ["package", "ref"]) do
+    %Finch.Response{status: 200, body: body} =
+      get("/collections/#{collection}/documents/search?" <> URI.encode_query(query))
 
-    Finch.build(:get, url, @headers)
+    Enum.map(body["hits"], fn hit ->
+      %{"document" => document} = hit
+      Map.take(document, fields)
+    end)
+  end
+
+  def get(path), do: req(:get, path)
+  def delete(path), do: req(:delete, path)
+  def post(path, body), do: req(:post, path, Jason.encode_to_iodata!(body))
+
+  defp req(verb, path, body \\ nil) do
+    Finch.build(verb, Path.join("http://localhost:8108", path), @headers, body)
     |> Finch.request!(Doku.Finch)
     |> Map.update!(:body, &Jason.decode!/1)
+  end
+
+  def ex do
+    # Doku.post("collections", %{
+    #   "name" => "functions",
+    #   "default_sorting_field" => "recent_downloads",
+    #   "token_separators" => ["."],
+    #   "fields" => [
+    #     %{"name" => "package", "type" => "string", "facet" => true},
+    #     %{"name" => "ref", "type" => "string", "index" => false, "optional" => true},
+    #     %{"name" => "title", "type" => "string"},
+    #     %{"name" => "recent_downloads", "type" => "int32"}
+    #   ]
+    # })
   end
 end

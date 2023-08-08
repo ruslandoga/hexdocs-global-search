@@ -1,3 +1,3 @@
 import Config
 
-config :doku, ecto_repos: [Doku.Repo]
+# config :doku, ecto_repos: [Doku.Repo]
