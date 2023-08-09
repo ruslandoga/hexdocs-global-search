@@ -33,13 +33,15 @@ result == [
 ]
 ```
 
-- [ ] search headers (autocomplete)
-- [ ] reproduce ex_doc behaviour as much as i can
-- [ ] search docs (full search)
-- [ ] related packages 2d
-- [ ] related packages v0.25-rc as node2vec
+- [x] search headers (autocomplete)
+- [x] build vectors.json with node2vec
+- [x] related packages v0.25-rc as node2vec
+- [ ] sorting by vector distance https://github.com/typesense/typesense/issues/1137#issuecomment-1671260221
 - [ ] join on packages v0.26-rc
+- [ ] reproduce ex_doc behaviour as much as i can
+- [ ] semantic search
+- [ ] search docs (full search)
 - [ ] deploy on digitalocean
 - [ ] integrate into ex_doc
 - [ ] use in before_ch, mua, bamboo_mua, swoosh_mua
-- [ ] semantic search
+- [ ] ~~related packages 2d~~ decided not to do

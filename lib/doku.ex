@@ -224,28 +224,90 @@ defmodule Doku do
     get("collections/docs")
   end
 
-  def create_collection(schema \\ just_functions_schema()) do
+  def recreate_collection(collection \\ "eh") do
+    a = delete("collections/#{collection}")
+    b = create_collection(node2vec_schema(collection))
+    c = import_functions_and_modules_collection()
+    [a, b, c]
+  end
+
+  def create_collection(schema) do
     case post("collections", schema) do
       %Finch.Response{status: 201} -> :ok
       resp -> raise "failed to create collection: " <> inspect(resp)
     end
   end
 
-  def just_functions_schema do
+  # def just_functions_schema do
+  #   %{
+  #     "name" => "functions",
+  #     "default_sorting_field" => "recent_downloads",
+  #     "token_separators" => [".", "_"],
+  #     "fields" => [
+  #       %{"name" => "package", "type" => "string", "facet" => true},
+  #       %{"name" => "ref", "type" => "string", "index" => false, "optional" => true},
+  #       %{"name" => "title", "type" => "string", "infix" => true},
+  #       %{"name" => "recent_downloads", "type" => "int32"}
+  #     ]
+  #   }
+  # end
+
+  def node2vec_schema(name) do
     %{
-      "name" => "functions",
+      "name" => name,
       "default_sorting_field" => "recent_downloads",
       "token_separators" => ["."],
       "fields" => [
         %{"name" => "package", "type" => "string", "facet" => true},
         %{"name" => "ref", "type" => "string", "index" => false, "optional" => true},
-        %{"name" => "title", "type" => "string"},
-        %{"name" => "recent_downloads", "type" => "int32"}
+        # %{
+        #   "name" => "type",
+        #   "type" => "string",
+        #   "facet" => true,
+        #   "index" => false,
+        #   "optional" => true
+        # },
+        %{"name" => "title", "type" => "string", "infix" => true},
+        %{"name" => "recent_downloads", "type" => "int32"},
+        # Enum.each(vectors, fn %{"name" => name, "vec" => vec} -> File.write!("vectors/#{name}.json", Jason.encode_to_iodata!(%{"vec" => vec})) end)
+        %{"name" => "package_vec", "type" => "float[]", "num_dim" => 64, "optional" => true}
       ]
     }
   end
 
-  def import_just_functions_collection do
+  ## for devdocs-like search
+  # def import_just_functions_collection do
+  #   File.ls!("index")
+  #   |> async_stream(
+  #     fn file ->
+  #       package = String.trim_trailing(file, ".json")
+  #       Logger.debug("importing #{package}")
+  #       items = read_docs_items(file)
+  #       stats = Jason.decode!(File.read!("stats/" <> file))
+  #       recent_downloads = get_in(stats, ["downloads", "recent"]) || 0
+
+  #       items =
+  #         items
+  #         |> Enum.filter(fn %{"type" => type, "ref" => ref, "title" => title} ->
+  #           if type == "function" do
+  #             segments = String.split(title, ".")
+  #             {function, module} = List.pop_at(segments, -1)
+  #             ref == Enum.join(module, ".") <> ".html#" <> function
+  #           end
+  #         end)
+  #         |> Enum.map(fn item ->
+  #           item |> Map.put("package", package) |> Map.put("recent_downloads", recent_downloads)
+  #         end)
+
+  #       import_items(_collection = "functions", items)
+  #     end,
+  #     ordered: false,
+  #     max_concurrency: 100
+  #   )
+  #   |> Stream.run()
+  # end
+
+  def import_functions_and_modules_collection do
     File.ls!("index")
     |> async_stream(
       fn file ->
@@ -255,23 +317,37 @@ defmodule Doku do
         stats = Jason.decode!(File.read!("stats/" <> file))
         recent_downloads = get_in(stats, ["downloads", "recent"]) || 0
 
+        package_vec =
+          case File.read("vectors/" <> file) do
+            {:ok, json} -> json |> Jason.decode!() |> Map.fetch!("vec")
+            {:error, :enoent} -> nil
+          end
+
         items =
           items
-          |> Enum.filter(fn %{"type" => type, "ref" => ref, "title" => title} ->
-            if type == "function" do
-              segments = String.split(title, ".")
-              {function, module} = List.pop_at(segments, -1)
-              ref == Enum.join(module, ".") <> ".html#" <> function
-            end
-          end)
+          # |> Enum.filter(fn %{"type" => type} ->
+          #   cond do
+          #     type in ["function", "module", "type"] ->
+          #       true
+
+          #     true ->
+          #       IO.inspect(type)
+          #       false
+          #   end
+          # end)
           |> Enum.map(fn item ->
-            item |> Map.put("package", package) |> Map.put("recent_downloads", recent_downloads)
+            # TODO use separate collection + join
+            Map.take(item, ["ref", "title"])
+            |> Map.put("package", package)
+            |> Map.put("package_vec", package_vec)
+            |> Map.put("recent_downloads", recent_downloads)
           end)
 
-        import_items(_collection = "functions", items)
+        import_items(_collection = "eh", items)
       end,
       ordered: false,
-      mac_concurrency: 1
+      max_concurrency: 3,
+      timeout: :infinity
     )
     |> Stream.run()
   end
@@ -447,12 +523,6 @@ defmodule Doku do
   defp to_json_string(<<?\r, rest::binary>>, acc),
     do: to_json_string(rest, <<acc::binary, "\\r">>)
 
-  # defp to_json_string(<<?\\, rest::binary>>, acc),
-  #   do: to_json_string(rest, <<acc::binary, "\\\\">>)
-
-  # defp to_json_string(<<?", rest::binary>>, acc),
-  #   do: to_json_string(rest, <<acc::binary, "\\\"">>)
-
   defp to_json_string(<<x, rest::binary>>, acc) when x <= 0x000F,
     do: to_json_string(rest, <<acc::binary, "\\u000#{Integer.to_string(x, 16)}">>)
 
@@ -460,16 +530,7 @@ defmodule Doku do
     do: to_json_string(rest, <<acc::binary, "\\u00#{Integer.to_string(x, 16)}">>)
 
   defp to_json_string(<<x, rest::binary>>, acc), do: to_json_string(rest, <<acc::binary, x>>)
-  # defp to_json_string(<<>>, acc), do: <<acc::binary, "\"">>
   defp to_json_string(<<>>, acc), do: acc
-
-  # defp ensure_json(<<"\\\#{", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\#{">>)
-
-  # # defp ensure_json(<<"\\\\d", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\d">>)
-  # # defp ensure_json(<<"\\s", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\s">>)
-  # # defp ensure_json(<<"\\\\", rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, "\\">>)
-  # defp ensure_json(<<x, rest::binary>>, acc), do: ensure_json(rest, <<acc::binary, x>>)
-  # defp ensure_json(<<>>, acc), do: acc
 
   defp import_items(_collection, []), do: :ok
 
@@ -500,14 +561,11 @@ defmodule Doku do
     end
   end
 
-  def search(collection, query, fields \\ ["package", "ref"]) do
-    %Finch.Response{status: 200, body: body} =
+  def search(collection, query) do
+    %Finch.Response{status: 200, body: %{"hits" => hits}} =
       get("/collections/#{collection}/documents/search?" <> URI.encode_query(query))
 
-    Enum.map(body["hits"], fn hit ->
-      %{"document" => document} = hit
-      Map.take(document, fields)
-    end)
+    Enum.map(hits, &Map.fetch!(&1, "document"))
   end
 
   def get(path), do: req(:get, path)
@@ -532,5 +590,15 @@ defmodule Doku do
     #     %{"name" => "recent_downloads", "type" => "int32"}
     #   ]
     # })
+  end
+
+  def cosine_similarity(a, b), do: cosine_similarity(a, b, 0, 0, 0)
+
+  def cosine_similarity([x1 | rest1], [x2 | rest2], s1, s2, s12) do
+    cosine_similarity(rest1, rest2, x1 * x1 + s1, x2 * x2 + s2, x1 * x2 + s12)
+  end
+
+  def cosine_similarity([], [], s1, s2, s12) do
+    s12 / (:math.sqrt(s1) * :math.sqrt(s2))
   end
 end
