@@ -40,8 +40,9 @@ result == [
 - [ ] join on packages v0.26-rc
 - [ ] reproduce ex_doc behaviour as much as i can
 - [ ] semantic search
-- [ ] search docs (full search)
-- [ ] deploy on digitalocean
-- [ ] integrate into ex_doc
-- [ ] use in before_ch, mua, bamboo_mua, swoosh_mua
+- [ ] index docs field (full search)
+- [ ] upload search index on s3
+- [ ] deploy typesense on digitalocean
+- [ ] integrate into fork of ex_doc
+- [ ] use forked ex_doc in before_ch, mua, bamboo_mua, swoosh_mua
 - [ ] ~~related packages 2d~~ decided not to do

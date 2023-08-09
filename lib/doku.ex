@@ -592,6 +592,12 @@ defmodule Doku do
     # })
   end
 
+  def package_similarity(a, b) do
+    %{"vec" => vec_a} = Jason.decode!(File.read!("vectors/#{a}.json"))
+    %{"vec" => vec_b} = Jason.decode!(File.read!("vectors/#{b}.json"))
+    cosine_similarity(vec_a, vec_b)
+  end
+
   def cosine_similarity(a, b), do: cosine_similarity(a, b, 0, 0, 0)
 
   def cosine_similarity([x1 | rest1], [x2 | rest2], s1, s2, s12) do
