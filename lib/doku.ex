@@ -260,13 +260,7 @@ defmodule Doku do
       "fields" => [
         %{"name" => "package", "type" => "string", "facet" => true},
         %{"name" => "ref", "type" => "string", "index" => false, "optional" => true},
-        # %{
-        #   "name" => "type",
-        #   "type" => "string",
-        #   "facet" => true,
-        #   "index" => false,
-        #   "optional" => true
-        # },
+        %{"name" => "type", "type" => "string", "facet" => true},
         %{"name" => "title", "type" => "string", "infix" => true},
         %{"name" => "recent_downloads", "type" => "int32"},
         # Enum.each(vectors, fn %{"name" => name, "vec" => vec} -> File.write!("vectors/#{name}.json", Jason.encode_to_iodata!(%{"vec" => vec})) end)
@@ -337,7 +331,8 @@ defmodule Doku do
           # end)
           |> Enum.map(fn item ->
             # TODO use separate collection + join
-            Map.take(item, ["ref", "title"])
+            Map.take(item, ["ref", "title", "type"])
+            |> Map.update!("type", fn type -> type || "extra" end)
             |> Map.put("package", package)
             |> Map.put("package_vec", package_vec)
             |> Map.put("recent_downloads", recent_downloads)
@@ -412,29 +407,29 @@ defmodule Doku do
 
   def read_docs_items(file), do: read_docs_items("index/" <> file)
 
-  def ensure_all_json do
-    File.ls!("index")
-    |> Enum.each(fn name ->
-      json = File.read!("index/#{name}")
+  # def ensure_all_json do
+  #   File.ls!("index")
+  #   |> Enum.each(fn name ->
+  #     json = File.read!("index/#{name}")
 
-      case Jason.decode(json) do
-        {:ok, _} ->
-          :ok
+  #     case Jason.decode(json) do
+  #       {:ok, _} ->
+  #         :ok
 
-        {:error, %Jason.DecodeError{}} ->
-          fixed_json = fix_json(json)
+  #       {:error, %Jason.DecodeError{}} ->
+  #         fixed_json = fix_json(json)
 
-          case Jason.decode(fixed_json) do
-            {:ok, _} ->
-              :ok
+  #         case Jason.decode(fixed_json) do
+  #           {:ok, _} ->
+  #             :ok
 
-            {:error, %Jason.DecodeError{position: position} = error} ->
-              Logger.error(file: name, section: binary_slice(fixed_json, position - 10, 20))
-              raise error
-          end
-      end
-    end)
-  end
+  #           {:error, %Jason.DecodeError{position: position} = error} ->
+  #             Logger.error(file: name, section: binary_slice(fixed_json, position - 10, 20))
+  #             raise error
+  #         end
+  #     end
+  #   end)
+  # end
 
   # https://github.com/elixir-lang/ex_doc/commit/60dfb4537549e551750bc9cd84610fb475f66acd
   defp fix_json(json) do

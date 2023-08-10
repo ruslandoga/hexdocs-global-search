@@ -36,7 +36,8 @@ result == [
 - [x] search headers (autocomplete)
 - [x] build vectors.json with node2vec
 - [x] related packages v0.25-rc as node2vec
-- [ ] sorting by vector distance https://github.com/typesense/typesense/issues/1137#issuecomment-1671260221
+- [x] sorting by vector distance https://github.com/typesense/typesense/issues/1137#issuecomment-1671260221
+- [x] limit by type?
 - [ ] join on packages v0.26-rc
 - [ ] reproduce ex_doc behaviour as much as i can
 - [ ] semantic search
