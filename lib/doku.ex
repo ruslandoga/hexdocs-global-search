@@ -224,10 +224,18 @@ defmodule Doku do
     get("collections/docs")
   end
 
-  def recreate_collection(collection \\ "eh") do
-    a = delete("collections/#{collection}")
-    b = create_collection(node2vec_schema(collection))
-    c = import_functions_and_modules_collection()
+  def recreate_docs_collection do
+    [
+      delete: delete("collections/docs"),
+      create_collection: create_collection(node2vec_join_schema()),
+      import_collection: import_docs_collection()
+    ]
+  end
+
+  def recreate_packages_collection do
+    a = delete("collections/packages")
+    b = create_collection(packages_schema())
+    c = import_packages_collection()
     [a, b, c]
   end
 
@@ -252,6 +260,70 @@ defmodule Doku do
   #   }
   # end
 
+  def semantic_schema do
+    %{
+      "name" => "semantic",
+      "token_separators" => ["."],
+      "fields" => [
+        %{"name" => "ref", "type" => "string", "index" => false, "optional" => true},
+        %{"name" => "type", "type" => "string", "facet" => true},
+        %{"name" => "title", "type" => "string", "index" => true},
+        %{"name" => "doc", "type" => "string"},
+        %{
+          "name" => "embedding",
+          "type" => "float[]",
+          "embed" => %{
+            "from" => [
+              "doc"
+            ],
+            "model_config" => %{
+              "model_name" => "openai/text-embedding-ada-002",
+              "api_key" => System.fetch_env!("OPENAI_API_KEY")
+            }
+          }
+        }
+      ]
+    }
+  end
+
+  def add_docs(package) do
+    items =
+      read_docs_items("index/#{package}.json")
+      |> Enum.map(fn item ->
+        item
+        |> Map.take(["ref", "title", "type", "doc"])
+        |> Map.update!("type", fn type -> type || "extra" end)
+      end)
+
+    import_items("semantic", items)
+  end
+
+  def semantic_search(text) do
+    post("multi_search", %{
+      "searches" => [
+        %{"collection" => "semantic", "q" => text, "query_by" => "embedding", "prefix" => false}
+      ]
+    })
+  end
+
+  def node2vec_join_schema do
+    %{
+      "name" => "docs",
+      "token_separators" => ["."],
+      "fields" => [
+        %{
+          "name" => "package",
+          "type" => "string",
+          "facet" => true,
+          "reference" => "packages.name"
+        },
+        %{"name" => "ref", "type" => "string", "index" => false, "optional" => true},
+        %{"name" => "type", "type" => "string", "facet" => true},
+        %{"name" => "title", "type" => "string", "infix" => true}
+      ]
+    }
+  end
+
   def node2vec_schema(name) do
     %{
       "name" => name,
@@ -265,6 +337,19 @@ defmodule Doku do
         %{"name" => "recent_downloads", "type" => "int32"},
         # Enum.each(vectors, fn %{"name" => name, "vec" => vec} -> File.write!("vectors/#{name}.json", Jason.encode_to_iodata!(%{"vec" => vec})) end)
         %{"name" => "package_vec", "type" => "float[]", "num_dim" => 64, "optional" => true}
+      ]
+    }
+  end
+
+  def packages_schema do
+    %{
+      "name" => "packages",
+      "symbols_to_index" => ["_"],
+      "default_sorting_field" => "recent_downloads",
+      "fields" => [
+        %{"name" => "name", "type" => "string", "facet" => true},
+        %{"name" => "recent_downloads", "type" => "int32"},
+        %{"name" => "vec", "type" => "float[]", "num_dim" => 64, "optional" => true}
       ]
     }
   end
@@ -300,6 +385,33 @@ defmodule Doku do
   #   )
   #   |> Stream.run()
   # end
+
+  # https://github.com/typesense/typesense/issues/1149
+  # File.ls!("stats") |> Enum.map(fn file -> package = String.trim_trailing(file, ".json"); {package, String.replace(package, "_", "")} end) |> Enum.group_by(fn {_, p} -> p end, fn {p, _} -> p end) |> Enum.filter(fn {_, p} -> length(p) > 1 end) |> Enum.flat_map(fn {_, p} -> p end) |> Enum.uniq
+
+  def import_docs_collection do
+    File.ls!("index")
+    |> async_stream(
+      fn file ->
+        package = String.trim_trailing(file, ".json")
+        Logger.debug("importing #{package}")
+
+        items =
+          read_docs_items(file)
+          |> Enum.map(fn item ->
+            Map.take(item, ["ref", "title", "type"])
+            |> Map.update!("type", fn type -> type || "extra" end)
+            |> Map.put("package", package)
+          end)
+
+        import_items("docs", items)
+      end,
+      ordered: false,
+      max_concurrency: 3,
+      timeout: :infinity
+    )
+    |> Stream.run()
+  end
 
   def import_functions_and_modules_collection do
     File.ls!("index")
@@ -343,6 +455,32 @@ defmodule Doku do
       ordered: false,
       max_concurrency: 3,
       timeout: :infinity
+    )
+    |> Stream.run()
+  end
+
+  def import_packages_collection do
+    File.ls!("stats")
+    |> async_stream(
+      fn file ->
+        name = String.trim_trailing(file, ".json")
+        Logger.debug("importing #{name}")
+        stats = Jason.decode!(File.read!("stats/" <> file))
+        recent_downloads = get_in(stats, ["downloads", "recent"]) || 0
+
+        vec =
+          case File.read("vectors/" <> file) do
+            {:ok, json} -> json |> Jason.decode!() |> Map.fetch!("vec")
+            {:error, :enoent} -> nil
+          end
+
+        import_items("packages", [
+          %{"name" => name, "recent_downloads" => recent_downloads, "vec" => vec}
+        ])
+      end,
+      ordered: false,
+      timeout: :timer.seconds(15),
+      max_concurrency: 10
     )
     |> Stream.run()
   end
@@ -573,18 +711,23 @@ defmodule Doku do
     |> Map.update!(:body, &Jason.decode!/1)
   end
 
-  def ex do
-    # Doku.post("collections", %{
-    #   "name" => "functions",
-    #   "default_sorting_field" => "recent_downloads",
-    #   "token_separators" => ["."],
-    #   "fields" => [
-    #     %{"name" => "package", "type" => "string", "facet" => true},
-    #     %{"name" => "ref", "type" => "string", "index" => false, "optional" => true},
-    #     %{"name" => "title", "type" => "string"},
-    #     %{"name" => "recent_downloads", "type" => "int32"}
-    #   ]
-    # })
+  def join_query(in_package \\ "ecto", text) do
+    %{"vec" => vec} = Jason.decode!(File.read!("vectors/#{in_package}.json"))
+
+    post("multi_search", %{
+      "searches" => [
+        %{
+          "query_by" => "title",
+          "q" => text,
+          "vector_query" => "$packages(vec:(#{Jason.encode!(vec)}, k:64))",
+          "filter_by" => "$packages(name:=package)",
+          "sort_by" =>
+            "_text_match(buckets: 3):desc,_vector_distance:asc,$packages(recent_downloads:desc)",
+          "infix" => "always",
+          "collection" => "docs"
+        }
+      ]
+    })
   end
 
   def package_similarity(a, b) do

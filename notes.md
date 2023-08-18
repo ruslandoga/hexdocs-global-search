@@ -38,9 +38,9 @@ result == [
 - [x] related packages v0.25-rc as node2vec
 - [x] sorting by vector distance https://github.com/typesense/typesense/issues/1137#issuecomment-1671260221
 - [x] limit by type?
-- [ ] join on packages v0.26-rc
+- [x] semantic search
+- [ ] join on packages v0.26-rc https://github.com/typesense/typesense/issues/1164
 - [ ] reproduce ex_doc behaviour as much as i can
-- [ ] semantic search
 - [ ] index docs field (full search)
 - [ ] upload search index on s3
 - [ ] deploy typesense on digitalocean
