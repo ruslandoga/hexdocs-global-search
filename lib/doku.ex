@@ -5,10 +5,12 @@ defmodule Doku do
 
   require Logger
 
+  @stdlib ["elixir", "eex", "ex_unit", "iex", "logger", "mix"]
+
   def scrape do
     File.mkdir("index")
 
-    packages()
+    (packages() ++ Enum.map(@stdlib, &%{name: &1}))
     |> async_stream(&__MODULE__.maybe_download_index/1, ordered: false, max_concurrency: 100)
     |> Stream.run()
   end
@@ -244,6 +246,46 @@ defmodule Doku do
       %Finch.Response{status: 201} -> :ok
       resp -> raise "failed to create collection: " <> inspect(resp)
     end
+  end
+
+  def basic_collection do
+    delete("collections/hexdocs_v0")
+
+    create_collection(%{
+      "name" => "hexdocs_v0",
+      "token_separators" => ["."],
+      "fields" => [
+        %{"name" => "ref", "type" => "string", "index" => false, "optional" => true},
+        %{"name" => "type", "type" => "string", "facet" => true},
+        %{"name" => "title", "type" => "string", "infix" => true},
+        %{"name" => "doc", "type" => "string"},
+        %{"name" => "package", "type" => "string", "facet" => true}
+      ]
+    })
+
+    File.ls!("index")
+    |> async_stream(
+      fn file ->
+        package = String.trim_trailing(file, ".json")
+        Logger.debug("importing #{package}")
+
+        items =
+          read_docs_items(file)
+          |> Enum.filter(fn item -> item["ref"] && item["title"] && item["doc"] end)
+          |> Enum.map(fn item ->
+            Map.take(item, ["ref", "title", "type", "doc"])
+            |> Map.update!("type", fn type -> type || "extra" end)
+            |> Map.update!("type", fn type -> type || "extra" end)
+            |> Map.put("package", package)
+          end)
+
+        import_items("hexdocs_v0", items)
+      end,
+      ordered: false,
+      max_concurrency: 3,
+      timeout: :infinity
+    )
+    |> Stream.run()
   end
 
   # def just_functions_schema do
@@ -695,10 +737,7 @@ defmodule Doku do
   end
 
   def search(collection, query) do
-    %Finch.Response{status: 200, body: %{"hits" => hits}} =
-      get("/collections/#{collection}/documents/search?" <> URI.encode_query(query))
-
-    Enum.map(hits, &Map.fetch!(&1, "document"))
+    get("/collections/#{collection}/documents/search?" <> URI.encode_query(query))
   end
 
   def get(path), do: req(:get, path)

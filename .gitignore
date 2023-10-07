@@ -29,3 +29,5 @@ doku-*.tar
 /tarballs/
 /releases/
 /vectors/
+
+*.gz
