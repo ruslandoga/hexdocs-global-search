@@ -3,18 +3,43 @@ defmodule Doku do
   Documentation for `Doku`.
   """
 
-  require Logger
-
   @stdlib ["elixir", "eex", "ex_unit", "iex", "logger", "mix"]
 
+  # for full text search
   def scrape do
     File.mkdir("index")
 
-    (packages() ++ Enum.map(@stdlib, &%{name: &1}))
-    |> async_stream(&__MODULE__.maybe_download_index/1, ordered: false, max_concurrency: 100)
+    packages = Enum.shuffle(packages() ++ Enum.map(@stdlib, &%{name: &1}))
+    downloaded = MapSet.new(File.ls!("index") |> Enum.map(&String.trim_trailing(&1, ".json")))
+
+    packages
+    |> Enum.reject(fn package -> MapSet.member?(downloaded, package.name) end)
+    |> async_stream(&__MODULE__.maybe_download_index/1,
+      timeout: :timer.seconds(60),
+      ordered: false,
+      max_concurrency: 50
+    )
     |> Stream.run()
   end
 
+  # for autocomplete
+  def scrape_sidebar_items do
+    File.mkdir("sidebar")
+
+    packages = Enum.shuffle(packages() ++ Enum.map(@stdlib, &%{name: &1}))
+    downloaded = MapSet.new(File.ls!("sidebar") |> Enum.map(&String.trim_trailing(&1, ".json")))
+
+    packages
+    |> Enum.reject(fn package -> MapSet.member?(downloaded, package.name) end)
+    |> async_stream(&__MODULE__.maybe_download_sidebar/1,
+      timeout: :timer.seconds(60),
+      ordered: false,
+      max_concurrency: 50
+    )
+    |> Stream.run()
+  end
+
+  # for popularity ranking
   def scrape_stats do
     File.mkdir("stats")
 
@@ -22,6 +47,7 @@ defmodule Doku do
 
     packages(config)
     |> async_stream(fn package -> maybe_download_stats(config, package) end,
+      timeout: :timer.seconds(60),
       ordered: false,
       max_concurrency: 3,
       timeout: :infinity
@@ -29,6 +55,7 @@ defmodule Doku do
     |> Stream.run()
   end
 
+  # don't need
   def scrape_tarballs do
     File.mkdir("tarballs")
 
@@ -36,12 +63,14 @@ defmodule Doku do
 
     versions(config)
     |> async_stream(fn package -> maybe_download_tarball(config, package) end,
+      timeout: :timer.seconds(60),
       ordered: false,
       max_concurrency: 100
     )
     |> Stream.run()
   end
 
+  # don't need
   def scrape_releasess do
     File.mkdir("releases")
 
@@ -59,11 +88,13 @@ defmodule Doku do
     %{name: name} = package
 
     if File.exists?("index/" <> name <> ".json") do
-      Logger.warning("#{name} already downloaded")
+      warning("#{name} already downloaded")
     else
-      Logger.debug("starting #{name}...")
+      debug("starting #{name}...")
 
-      case Finch.request!(Finch.build(:get, "https://hexdocs.pm/#{name}/search.html"), Doku.Finch) do
+      case Finch.request!(Finch.build(:get, "https://hexdocs.pm/#{name}/search.html"), Doku.Finch,
+             receive_timeout: :timer.seconds(60)
+           ) do
         %Finch.Response{status: 200, body: body} ->
           html = Floki.parse_document!(body)
           scripts = Floki.find(html, "script")
@@ -74,7 +105,8 @@ defmodule Doku do
             %Finch.Response{status: 200, body: body} =
               Finch.request!(
                 Finch.build(:get, "https://hexdocs.pm/#{name}/" <> index_url),
-                Doku.Finch
+                Doku.Finch,
+                receive_timeout: :timer.seconds(60)
               )
 
             json =
@@ -84,11 +116,79 @@ defmodule Doku do
               end
 
             File.write!("index/" <> name <> ".json", json)
-            Logger.info("downloaded #{name}")
+            info("downloaded #{name}")
           end
 
         %Finch.Response{status: 404} ->
-          Logger.error("no search page for #{name}")
+          error("no search page for #{name}")
+      end
+    end
+  end
+
+  def maybe_download_sidebar(package) do
+    %{name: name} = package
+
+    if File.exists?("sidebar/" <> name <> ".json") do
+      warning("#{name} already downloaded")
+    else
+      debug("starting #{name}...")
+
+      case Finch.request!(Finch.build(:get, "https://hexdocs.pm/#{name}/index.html"), Doku.Finch,
+             receive_timeout: :timer.seconds(60)
+           ) do
+        %Finch.Response{status: 200, body: body} ->
+          case body
+               |> Floki.parse_document!()
+               |> Floki.find("meta[http-equiv=refresh]") do
+            [{"meta", [{"http-equiv", "refresh"}, {"content", "0; url=" <> path}], []}] ->
+              case Finch.request!(
+                     # https://hexdocs.pm/supabase_types/Supabase Types.html
+                     Finch.build(:get, "https://hexdocs.pm/#{name}/" <> URI.encode(path)),
+                     Doku.Finch,
+                     receive_timeout: :timer.seconds(60)
+                   ) do
+                %Finch.Response{status: 200, body: body} ->
+                  html = Floki.parse_document!(body)
+                  scripts = Floki.find(html, "script")
+
+                  if sidebar_url = find_script(scripts, "dist/sidebar_items") do
+                    case Finch.request!(
+                           Finch.build(
+                             :get,
+                             # https://hexdocs.pm/stationary/dist/sidebar_items-04a9b1e5a6 5.js
+                             "https://hexdocs.pm/#{name}/" <> URI.encode(sidebar_url)
+                           ),
+                           Doku.Finch,
+                           receive_timeout: :timer.seconds(60)
+                         ) do
+                      %Finch.Response{status: 200, body: body} ->
+                        case body do
+                          "sidebarNodes=" <> json ->
+                            File.write!("sidebar/" <> name <> ".json", json)
+
+                          "sidebarNodes = " <> json ->
+                            File.write!("sidebar/" <> name <> ".json", json)
+                        end
+
+                        info("downloaded #{name}")
+
+                      %Finch.Response{status: 404} ->
+                        error("no sidebar for #{name} (404 for #{sidebar_url}")
+                    end
+                  else
+                    error("no sidebar for #{name} (script not found in HTML)")
+                  end
+
+                %Finch.Response{status: 404} ->
+                  error("no sidebar for #{name} (404 after redirect)")
+              end
+
+            _not_hexdocs ->
+              error("no sidebar for #{name} (not hexdocs)")
+          end
+
+        %Finch.Response{status: 404} ->
+          error("no sidebar for #{name} (404)")
       end
     end
   end
@@ -121,22 +221,22 @@ defmodule Doku do
     %{name: name} = package
 
     if File.exists?("stats/" <> name <> ".json") do
-      Logger.warning("#{name} already downloaded")
+      warning("#{name} already downloaded")
     else
-      Logger.debug("starting #{name}...")
+      debug("starting #{name}...")
 
       case :hex_api.get(config, ["packages", name]) do
         {:ok, {200, _headers, stats}} ->
           json = Jason.encode_to_iodata!(stats)
           File.write!("stats/" <> name <> ".json", json)
-          Logger.info("downloaded #{name}")
+          info("downloaded #{name}")
 
         {:ok, {429, headers, _body}} ->
           reset_at = Map.fetch!(headers, "x-ratelimit-reset")
           sleep_for = String.to_integer(reset_at) - :os.system_time(:second)
 
           if sleep_for > 0 do
-            Logger.debug("sleeping for #{sleep_for} seconds")
+            debug("sleeping for #{sleep_for} seconds")
             :timer.sleep(:timer.seconds(sleep_for))
           end
 
@@ -149,9 +249,9 @@ defmodule Doku do
     %{name: name} = package
 
     if File.exists?("releases/" <> name <> ".json") do
-      Logger.warning("#{name} already exists")
+      warning("#{name} already exists")
     else
-      Logger.debug("starting #{name}...")
+      debug("starting #{name}...")
 
       case :hex_repo.get_package(config, name) do
         {:ok, {200, _headers, package}} ->
@@ -166,9 +266,9 @@ defmodule Doku do
               |> Jason.encode_to_iodata!()
 
             File.write!("releases/" <> name <> ".json", json)
-            Logger.info("downloaded #{name}")
+            info("downloaded #{name}")
           else
-            Logger.warning("#{inspect(package)} doesn't have a valid release")
+            warning("#{inspect(package)} doesn't have a valid release")
           end
 
         {:ok, {429, headers, _body}} ->
@@ -176,7 +276,7 @@ defmodule Doku do
           sleep_for = String.to_integer(reset_at) - :os.system_time(:second)
 
           if sleep_for > 0 do
-            Logger.debug("sleeping for #{sleep_for} seconds")
+            debug("sleeping for #{sleep_for} seconds")
             :timer.sleep(:timer.seconds(sleep_for))
           end
 
@@ -189,20 +289,109 @@ defmodule Doku do
     %{name: name} = package
 
     if File.exists?("tarballs/" <> name <> ".tar.gz") do
-      Logger.warning("#{name} already downloaded")
+      warning("#{name} already downloaded")
     else
-      Logger.debug("starting #{name}...")
+      debug("starting #{name}...")
 
       if version = latest_version(package) do
         {:ok, {200, _headers, tarball}} =
           :hex_repo.get_tarball(config, name, version)
 
         File.write!("tarballs/" <> name <> ".tar.gz", tarball)
-        Logger.info("downloaded #{name}")
+        info("downloaded #{name}")
       else
-        Logger.warning("#{inspect(package)} doesn't have a valid version")
+        warning("#{inspect(package)} doesn't have a valid version")
       end
     end
+  end
+
+  def process_downloads do
+    rows =
+      Path.wildcard("downloads/*.json")
+      |> Enum.map(fn path ->
+        json = :json.decode(File.read!(path))
+
+        downloads =
+          Enum.map(["all", "recent", "week", "day"], fn field -> Map.get(json, field) end)
+
+        [String.replace(path, ["downloads/", ".json"], "") | downloads]
+      end)
+
+    File.write!(
+      "downloads.csv",
+      NimbleCSV.RFC4180.dump_to_iodata([["package", "all", "recent", "week", "day"] | rows])
+    )
+  end
+
+  def process_index do
+    rows =
+      Path.wildcard("index/*.json")
+      |> Enum.flat_map(fn path ->
+        json = File.read!(path)
+
+        docs =
+          try do
+            :json.decode(json)
+          rescue
+            _e ->
+              fixed_json = fix_json(json)
+              :json.decode(fixed_json)
+          end
+
+        items =
+          case docs do
+            %{"items" => items} -> items
+            items when is_list(items) -> items
+          end
+
+        package = path |> Path.basename() |> Path.rootname(".json")
+
+        Enum.map(items, fn item ->
+          [
+            package,
+            Map.fetch!(item, "type"),
+            Map.fetch!(item, "ref"),
+            Map.fetch!(item, "title"),
+            Map.fetch!(item, "doc")
+          ]
+        end)
+      end)
+
+    File.write!(
+      "search_data.csv",
+      NimbleCSV.RFC4180.dump_to_iodata([["package", "type", "ref", "title", "doc"] | rows])
+    )
+  end
+
+  def process_sidebar do
+    # File.rm!("sidebar.csv")
+
+    Path.wildcard("sidebar/*.json")
+    |> Enum.flat_map(fn path ->
+      json = File.read!(path)
+      json = String.trim_trailing(json, ";\nfillSidebarWithNodes(sidebarNodes);\n")
+      json = String.replace(json, "class=\"inline\"", "class=\\\"inline\\\"")
+
+      _sidebar =
+        try do
+          :json.decode(json)
+        rescue
+          _e ->
+            fixed_json = fix_json(json)
+            :json.decode(fixed_json)
+        end
+
+      # exceptions = Map.get(sidebar, "exceptions", [])
+      # extras = Map.get(sidebar, "extras", [])
+      # modules = Map.get(sidebar, "modules", [])
+      # protocols = Map.get(sidebar, "protocols", [])
+      # tasks = Map.get(sidebar, "tasks", [])
+    end)
+
+    # File.write!(
+    #   "downloads.csv",
+    #   NimbleCSV.RFC4180.dump_to_iodata([["package", "all", "recent", "week", "day"] | rows])
+    # )
   end
 
   defp latest_version(package) do
@@ -267,7 +456,7 @@ defmodule Doku do
     |> async_stream(
       fn file ->
         package = String.trim_trailing(file, ".json")
-        Logger.debug("importing #{package}")
+        debug("importing #{package}")
 
         items =
           read_docs_items(file)
@@ -436,7 +625,7 @@ defmodule Doku do
     |> async_stream(
       fn file ->
         package = String.trim_trailing(file, ".json")
-        Logger.debug("importing #{package}")
+        debug("importing #{package}")
 
         items =
           read_docs_items(file)
@@ -460,7 +649,7 @@ defmodule Doku do
     |> async_stream(
       fn file ->
         package = String.trim_trailing(file, ".json")
-        Logger.debug("importing #{package}")
+        debug("importing #{package}")
         items = read_docs_items(file)
         stats = Jason.decode!(File.read!("stats/" <> file))
         recent_downloads = get_in(stats, ["downloads", "recent"]) || 0
@@ -506,7 +695,7 @@ defmodule Doku do
     |> async_stream(
       fn file ->
         name = String.trim_trailing(file, ".json")
-        Logger.debug("importing #{name}")
+        debug("importing #{name}")
         stats = Jason.decode!(File.read!("stats/" <> file))
         recent_downloads = get_in(stats, ["downloads", "recent"]) || 0
 
@@ -574,7 +763,7 @@ defmodule Doku do
               docs
 
             {:error, %Jason.DecodeError{position: position} = error} ->
-              Logger.error(file: file, section: binary_slice(fixed_json, position - 10, 20))
+              error(inspect(file: file, section: binary_slice(fixed_json, position - 10, 20)))
               raise error
           end
       end
@@ -783,5 +972,14 @@ defmodule Doku do
 
   def cosine_similarity([], [], s1, s2, s12) do
     s12 / (:math.sqrt(s1) * :math.sqrt(s2))
+  end
+
+  defp error(msg), do: colored_io_puts(IO.ANSI.red(), msg)
+  defp warning(msg), do: colored_io_puts(IO.ANSI.yellow(), msg)
+  defp info(msg), do: IO.puts(msg)
+  defp debug(msg), do: colored_io_puts(IO.ANSI.cyan(), msg)
+
+  defp colored_io_puts(color, msg) do
+    IO.puts(color <> msg <> IO.ANSI.reset())
   end
 end

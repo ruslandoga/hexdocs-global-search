@@ -5,7 +5,7 @@ defmodule Doku.MixProject do
     [
       app: :doku,
       version: "0.1.0",
-      elixir: "~> 1.15",
+      elixir: "~> 1.17",
       start_permanent: Mix.env() == :prod,
       deps: deps()
     ]
@@ -25,7 +25,8 @@ defmodule Doku.MixProject do
       {:finch, "~> 0.16.0"},
       {:floki, "~> 0.34.3"},
       {:jason, "~> 1.4"},
-      {:hex_core, "~> 0.10.0"}
+      {:hex_core, "~> 0.10.0"},
+      {:nimble_csv, "~> 1.2"}
     ]
   end
 end
