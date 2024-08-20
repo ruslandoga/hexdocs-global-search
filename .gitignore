@@ -31,3 +31,5 @@ doku-*.tar
 /vectors/
 
 *.gz
+*.zst
+*.jsonl

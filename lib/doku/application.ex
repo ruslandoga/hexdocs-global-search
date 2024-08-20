@@ -8,7 +8,7 @@ defmodule Doku.Application do
   @impl true
   def start(_type, _args) do
     children = [
-      {Finch, name: Doku.Finch, pools: [default: [protocol: :http2]]},
+      {Finch, name: Doku.Finch, pools: %{default: [size: 100]}},
       {Task.Supervisor, name: Doku.TaskSupervisor}
       # Doku.Repo
     ]
