@@ -28,7 +28,7 @@ defmodule Doku do
     %{config | http_adapter: {Doku.HTTP, %{}}}
   end
 
-  def scrape_tarballs do
+  def scrape_all_tarballs do
     File.mkdir("tarballs")
 
     config = hex_config()
@@ -43,6 +43,16 @@ defmodule Doku do
     ]
 
     packages = stdlib ++ versions(config)
+
+    packages =
+      Enum.flat_map(packages, fn %{name: name, versions: versions, retired: retired} ->
+        versions
+        |> Enum.with_index()
+        |> Enum.reject(fn {_version, index} -> index in retired end)
+        |> Enum.map(fn {version, _index} ->
+          %{name: name, version: version}
+        end)
+      end)
 
     Enum.shuffle(packages)
     |> async_stream(fn package -> maybe_download_tarball(config, package) end,
@@ -64,11 +74,11 @@ defmodule Doku do
         json =
           Enum.find_value(files, fn {name, content} ->
             case name do
-              ~c"dist/search_data-" ++ _ ->
+              ~c"dist/search_data-" ++ _digest ->
                 "searchData=" <> json = content
                 json
 
-              ~c"dist/search_items-" ++ _ ->
+              ~c"dist/search_items-" ++ _digest ->
                 "searchNodes=" <> json = content
                 json
 
@@ -84,7 +94,14 @@ defmodule Doku do
             rescue
               _e ->
                 fixed_json = fix_json(json)
-                :json.decode(fixed_json)
+
+                try do
+                  :json.decode(fixed_json)
+                rescue
+                  _e ->
+                    warning("failed to decode #{package} after attempted json fix")
+                    []
+                end
             end
           else
             []
@@ -118,28 +135,8 @@ defmodule Doku do
     File.rename!("docs.jsonl.tmp", "docs.jsonl")
   end
 
-  # don't need
-  # def scrape_releasess do
-  #   File.mkdir("releases")
-
-  #   config = :hex_core.default_config()
-  #   config = %{config | http_adapter: {Doku.HTTP, []}}
-
-  #   packages(config)
-  #   |> async_stream(fn package -> maybe_download_release(config, package) end,
-  #     ordered: false,
-  #     max_concurrency: 100
-  #   )
-  #   |> Stream.run()
-  # end
-
   def async_stream(enumerable, fun, opts \\ []) do
     Task.Supervisor.async_stream(Doku.TaskSupervisor, enumerable, fun, opts)
-  end
-
-  def packages(config \\ hex_config()) do
-    {:ok, {200, _headers, %{packages: packages}}} = :hex_repo.get_names(config)
-    packages
   end
 
   def versions(config \\ hex_config()) do
@@ -147,246 +144,38 @@ defmodule Doku do
     packages
   end
 
-  # def maybe_download_release(config, package) do
-  #   %{name: name} = package
-
-  #   if File.exists?("releases/" <> name <> ".json") do
-  #     warning("#{name} already exists")
-  #   else
-  #     debug("starting #{name}...")
-
-  #     case :hex_repo.get_package(config, name) do
-  #       {:ok, {200, _headers, package}} ->
-  #         %{releases: releases} = package
-  #         releases = Enum.reject(releases, & &1[:retired])
-  #         latest_release = List.last(releases)
-
-  #         if latest_release do
-  #           json =
-  #             latest_release
-  #             |> Map.take([:version, :dependencies])
-  #             |> Jason.encode_to_iodata!()
-
-  #           File.write!("releases/" <> name <> ".json", json)
-  #           info("downloaded #{name}")
-  #         else
-  #           warning("#{inspect(package)} doesn't have a valid release")
-  #         end
-
-  #       {:ok, {429, headers, _body}} ->
-  #         reset_at = Map.fetch!(headers, "x-ratelimit-reset")
-  #         sleep_for = String.to_integer(reset_at) - :os.system_time(:second)
-
-  #         if sleep_for > 0 do
-  #           debug("sleeping for #{sleep_for} seconds")
-  #           :timer.sleep(:timer.seconds(sleep_for))
-  #         end
-
-  #         maybe_download_release(config, package)
-  #     end
-  #   end
-  # end
-
   def maybe_download_tarball(config \\ hex_config(), package) do
-    %{name: name} = package
+    filename = "tarballs/" <> package.name <> "-" <> package.version <> ".tar.gz"
 
-    if File.exists?("tarballs/" <> name <> ".tar.gz") do
-      warning("#{name} already downloaded")
+    if File.exists?(filename) do
+      warning("#{filename} already downloaded")
     else
-      debug("starting #{name}...")
+      debug("downloading #{filename}...")
 
-      if version = latest_version(package) do
-        case :hex_repo.get_docs(config, name, version) do
-          {:ok, {200, _headers, tarball}} ->
-            File.write!("tarballs/" <> name <> ".tar.gz", tarball)
-            info("downloaded #{name}")
+      case :hex_repo.get_docs(config, package.name, package.version) do
+        {:ok, {200, _headers, tarball}} ->
+          File.write!(filename, tarball)
+          info("downloaded #{filename}")
 
-          {:ok, {404, _headers, _body}} ->
-            warning("#{inspect(package)} not found (404) for docs #{name}.tar.gz")
-        end
-      else
-        warning("#{inspect(package)} doesn't have a valid version")
+        {:ok, {404, _headers, _body}} ->
+          warning("#{inspect(package)} not found (404) for docs #{filename}.tar.gz")
+
+        {:ok, {503, _headers, _body}} ->
+          error("#{inspect(package)} failed (503) for docs #{filename}.tar.gz")
       end
     end
   end
 
-  def process_index do
-    rows =
-      Path.wildcard("index/*.json")
-      |> Enum.flat_map(fn path ->
-        json = File.read!(path)
+  # defp latest_version(package) do
+  #   %{versions: versions, retired: retired} = package
 
-        docs =
-          try do
-            :json.decode(json)
-          rescue
-            _e ->
-              fixed_json = fix_json(json)
-              :json.decode(fixed_json)
-          end
-
-        items =
-          case docs do
-            %{"items" => items} -> items
-            items when is_list(items) -> items
-          end
-
-        package = path |> Path.basename() |> Path.rootname(".json")
-
-        Enum.map(items, fn item ->
-          [
-            package,
-            Map.fetch!(item, "type"),
-            Map.fetch!(item, "ref"),
-            Map.fetch!(item, "title"),
-            Map.fetch!(item, "doc")
-          ]
-        end)
-      end)
-
-    File.write!(
-      "search_data.csv",
-      NimbleCSV.RFC4180.dump_to_iodata([["package", "type", "ref", "title", "doc"] | rows])
-    )
-  end
-
-  defp latest_version(package) do
-    %{versions: versions, retired: retired} = package
-
-    with {version, _index} <-
-           versions
-           |> Enum.with_index()
-           |> Enum.reject(fn {_version, index} -> index in retired end)
-           |> List.last(),
-         do: version
-  end
-
-  ## for devdocs-like search
-  # def import_just_functions_collection do
-  #   File.ls!("index")
-  #   |> async_stream(
-  #     fn file ->
-  #       package = String.trim_trailing(file, ".json")
-  #       Logger.debug("importing #{package}")
-  #       items = read_docs_items(file)
-  #       stats = Jason.decode!(File.read!("stats/" <> file))
-  #       recent_downloads = get_in(stats, ["downloads", "recent"]) || 0
-
-  #       items =
-  #         items
-  #         |> Enum.filter(fn %{"type" => type, "ref" => ref, "title" => title} ->
-  #           if type == "function" do
-  #             segments = String.split(title, ".")
-  #             {function, module} = List.pop_at(segments, -1)
-  #             ref == Enum.join(module, ".") <> ".html#" <> function
-  #           end
-  #         end)
-  #         |> Enum.map(fn item ->
-  #           item |> Map.put("package", package) |> Map.put("recent_downloads", recent_downloads)
-  #         end)
-
-  #       import_items(_collection = "functions", items)
-  #     end,
-  #     ordered: false,
-  #     max_concurrency: 100
-  #   )
-  #   |> Stream.run()
+  #   with {version, _index} <-
+  #          versions
+  #          |> Enum.with_index()
+  #          |> Enum.reject(fn {_version, index} -> index in retired end)
+  #          |> List.last(),
+  #        do: version
   # end
-
-  # https://github.com/typesense/typesense/issues/1149
-  # File.ls!("stats") |> Enum.map(fn file -> package = String.trim_trailing(file, ".json"); {package, String.replace(package, "_", "")} end) |> Enum.group_by(fn {_, p} -> p end, fn {p, _} -> p end) |> Enum.filter(fn {_, p} -> length(p) > 1 end) |> Enum.flat_map(fn {_, p} -> p end) |> Enum.uniq
-
-  # def import_functions_and_modules_collection do
-  #   File.ls!("index")
-  #   |> async_stream(
-  #     fn file ->
-  #       package = String.trim_trailing(file, ".json")
-  #       debug("importing #{package}")
-  #       items = read_docs_items(file)
-  #       stats = Jason.decode!(File.read!("stats/" <> file))
-  #       recent_downloads = get_in(stats, ["downloads", "recent"]) || 0
-
-  #       package_vec =
-  #         case File.read("vectors/" <> file) do
-  #           {:ok, json} -> json |> Jason.decode!() |> Map.fetch!("vec")
-  #           {:error, :enoent} -> nil
-  #         end
-
-  #       items =
-  #         items
-  #         # |> Enum.filter(fn %{"type" => type} ->
-  #         #   cond do
-  #         #     type in ["function", "module", "type"] ->
-  #         #       true
-
-  #         #     true ->
-  #         #       IO.inspect(type)
-  #         #       false
-  #         #   end
-  #         # end)
-  #         |> Enum.map(fn item ->
-  #           # TODO use separate collection + join
-  #           Map.take(item, ["ref", "title", "type"])
-  #           |> Map.update!("type", fn type -> type || "extra" end)
-  #           |> Map.put("package", package)
-  #           |> Map.put("package_vec", package_vec)
-  #           |> Map.put("recent_downloads", recent_downloads)
-  #         end)
-
-  #       import_items(_collection = "eh", items)
-  #     end,
-  #     ordered: false,
-  #     max_concurrency: 3,
-  #     timeout: :infinity
-  #   )
-  #   |> Stream.run()
-  # end
-
-  # def everything_schema do
-  #   %{
-  #     "name" => "docs",
-  #     "default_sorting_field" => "recent_downloads",
-  #     "fields" => [
-  #       %{"name" => "doc", "type" => "string"},
-  #       %{"name" => "ref", "type" => "string", "index" => false},
-  #       %{"name" => "title", "type" => "string"},
-  #       %{"name" => "module", "type" => "string", "optional" => true},
-  #       %{"name" => "function", "type" => "string", "optional" => true},
-  #       %{"name" => "package", "type" => "string"},
-  #       %{"name" => "type", "type" => "string", "facet" => true},
-  #       %{"name" => "recent_downloads", "type" => "int32"}
-  #     ]
-  #   }
-  # end
-
-  def read_docs_items("index/" <> _ = file) do
-    json = File.read!(file)
-
-    docs =
-      case Jason.decode(json) do
-        {:ok, docs} ->
-          docs
-
-        {:error, %Jason.DecodeError{}} ->
-          fixed_json = fix_json(json)
-
-          case Jason.decode(fixed_json) do
-            {:ok, docs} ->
-              docs
-
-            {:error, %Jason.DecodeError{position: position} = error} ->
-              error(inspect(file: file, section: binary_slice(fixed_json, position - 10, 20)))
-              raise error
-          end
-      end
-
-    case docs do
-      %{"items" => items} -> items
-      items when is_list(items) -> items
-    end
-  end
-
-  def read_docs_items(file), do: read_docs_items("index/" <> file)
 
   # https://github.com/elixir-lang/ex_doc/commit/60dfb4537549e551750bc9cd84610fb475f66acd
   defp fix_json(json) do
